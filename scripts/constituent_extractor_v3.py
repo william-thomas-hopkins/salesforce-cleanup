@@ -14,7 +14,11 @@ Usage:
     python constituent_extractor_v3.py input.csv output.xlsx --api-key YOUR_KEY
 
 """
+import os
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
 import argparse
 import json
 import re

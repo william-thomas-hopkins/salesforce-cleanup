@@ -1,0 +1,25 @@
+# Data files - NEVER COMMIT
+data/*.csv
+data/*.xlsx
+data/*.xls
+output/*
+!output/.gitkeep
+!data/.gitkeep
+
+# Python
+venv/
+__pycache__/
+*.pyc
+.env
+
+# API keys
+.env
+*.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

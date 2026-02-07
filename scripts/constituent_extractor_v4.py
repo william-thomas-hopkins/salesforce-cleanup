@@ -195,6 +195,7 @@ FALSE_POSITIVE_NAMES = {
 
 # data structures
 
+
 @dataclass
 class PersonBlock:
     """A grouped set of contact info for one person found in text."""
@@ -264,6 +265,7 @@ class CaseExtraction:
     is_email_chain: bool = False
     is_multi_person: bool = False
     person_count: int = 0
+    _combined_text: str = ""  # internal: combined text for LLM checks
 
     # Action
     action: str = ""
@@ -798,7 +800,7 @@ def call_llm(text, emails, phones, addresses, people, client):
             ) or 'None',
         )
         resp = client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-haiku-4-5-20251001",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -812,17 +814,68 @@ def call_llm(text, emails, phones, addresses, people, client):
 
 
 def needs_llm(ext: CaseExtraction) -> bool:
-    if len(ext.all_emails) > 1 and not ext.best_email:
+    """Determine if LLM disambiguation would help this case."""
+    # Multiple non-staff emails — which one is the constituent's?
+    if len(ext.all_emails) > 1:
         return True
-    if ext.is_multi_person and not ext.best_email:
+    # Multi-person case — is our best guess the right person?
+    if ext.is_multi_person:
         return True
-    if ext.is_email_chain and ext.all_emails and not ext.sf_contact_email:
+    # Email chain with extracted emails but no linked contact
+    if ext.is_email_chain and ext.all_emails and not ext.sf_has_contact:
         return True
-    if len(ext.all_addresses) > 1 and not any(
-        is_constituent_context('', a) for a in ext.all_addresses
-    ):
+    # Multiple addresses and no constituent context clue
+    if len(ext.all_addresses) > 1:
+        text_parts = []
+        for a in ext.all_addresses:
+            if is_constituent_context(ext._combined_text, a):
+                return False  # We have a clear signal, no LLM needed
         return True
     return False
+
+
+def _llm_priority_score(ext: CaseExtraction) -> int:
+    """
+    Score how valuable an LLM call would be for this case.
+    Higher = more valuable = process first.
+
+    Priority order:
+    1. Multi-person unlinked cases (hardest to resolve by regex)
+    2. Multiple emails, unlinked (LLM picks the right constituent email → CREATE_CONTACT)
+    3. Email chains, unlinked (LLM disambiguates forwarded vs sender)
+    4. Multiple addresses (LLM separates constituent addr from complaint addr)
+    5. Already-linked cases get lower priority (enrichment, not linkage)
+    """
+    score = 0
+
+    # Unlinked cases are more valuable than linked ones
+    if not ext.sf_has_contact:
+        score += 100
+
+    # Multi-person is hardest to resolve
+    if ext.is_multi_person:
+        score += 50 + (ext.person_count * 10)
+
+    # Multiple emails — LLM picks the right one
+    if len(ext.all_emails) > 1:
+        score += 40 + (len(ext.all_emails) * 5)
+
+    # Email chain ambiguity
+    if ext.is_email_chain:
+        score += 30
+
+    # Multiple addresses — constituent vs complaint
+    if len(ext.all_addresses) > 1:
+        score += 20 + (len(ext.all_addresses) * 3)
+
+    # Cases with more text give the LLM more to work with
+    text_len = len(ext._combined_text)
+    if text_len > 500:
+        score += 10
+    if text_len > 1500:
+        score += 5
+
+    return score
 
 
 # main extraction pipeline
@@ -855,6 +908,7 @@ def extract_case(row: pd.Series, contact_index: ContactIndex,
         if pd.notna(v) and str(v).strip():
             text_parts.append(str(v))
     combined = "\n".join(text_parts)
+    ext._combined_text = combined
 
     if not combined.strip():
         ext.action = "NO_TEXT"
@@ -1366,9 +1420,8 @@ def create_excel(output_df: pd.DataFrame, output_path: str, stats: dict,
 
 
 # main
-
 def process(cases_path: str, contacts_path: Optional[str], output_path: str,
-            use_llm: bool = False, llm_limit: int = 500, api_key: str = "") -> dict:
+            use_llm: bool = False, llm_limit: int = 1500, api_key: str = "") -> dict:
 
     print(f"Loading cases from {cases_path}...")
     cases_df = load_file(cases_path)
@@ -1394,23 +1447,85 @@ def process(cases_path: str, contacts_path: Optional[str], output_path: str,
     ci = ContactIndex(contacts_df, cases_df)
     print(f"  {len(ci.email_to_contact)} unique emails, {len(ci.phone_to_contact)} phones indexed")
 
-    # Process cases
-    print("Extracting contact info...")
+    # Process cases — two-pass approach
+    # Pass 1: Extract everything with regex (fast, free)
+    print("Pass 1: Regex extraction...")
     results: List[CaseExtraction] = []
-    llm_calls = 0
 
     for idx, row in cases_df.iterrows():
         if idx % 1000 == 0 and idx > 0:
-            print(f"  {idx}/{len(cases_df)} processed (LLM: {llm_calls})")
-
-        should_llm = use_llm and llm_calls < llm_limit
-        ext = extract_case(row, ci, client if should_llm else None, should_llm)
-        if ext.llm_used:
-            llm_calls += 1
-            time.sleep(0.1)
+            print(f"  {idx}/{len(cases_df)} processed")
+        ext = extract_case(row, ci, client=None, use_llm=False)
         results.append(ext)
 
-    print(f"  {len(results)} cases processed, {llm_calls} LLM calls")
+    print(f"  {len(results)} cases extracted")
+
+    # Pass 2: LLM disambiguation on highest-priority cases
+    llm_calls = 0
+    if use_llm and client:
+        # Score each case for LLM priority
+        llm_candidates = []
+        for i, ext in enumerate(results):
+            if not needs_llm(ext):
+                continue
+            score = _llm_priority_score(ext)
+            llm_candidates.append((score, i, ext))
+
+        # Sort by priority (highest first)
+        llm_candidates.sort(key=lambda x: -x[0])
+        eligible = len(llm_candidates)
+        to_process = eligible if llm_limit == 0 else min(eligible, llm_limit)
+
+        print(f"Pass 2: LLM disambiguation ({to_process} of {eligible} eligible, limit={llm_limit})...")
+        if eligible > 0:
+            # Show priority breakdown
+            reasons = defaultdict(int)
+            for score, _, ext in llm_candidates[:to_process]:
+                if ext.is_multi_person:
+                    reasons['multi_person'] += 1
+                elif len(ext.all_emails) > 1:
+                    reasons['multi_email'] += 1
+                elif ext.is_email_chain:
+                    reasons['email_chain'] += 1
+                elif len(ext.all_addresses) > 1:
+                    reasons['multi_address'] += 1
+            print(f"  Priority breakdown: {dict(reasons)}")
+
+        for rank, (score, idx, ext) in enumerate(llm_candidates[:to_process]):
+            if rank % 100 == 0 and rank > 0:
+                print(f"  {rank}/{to_process} LLM calls made")
+
+            combined = ext._combined_text
+            result = call_llm(combined, ext.all_emails, ext.all_phones,
+                              ext.all_addresses, ext.persons, client)
+            if result and 'error' not in result:
+                ext.llm_used = True
+                ext.llm_email = result.get('constituent_email') or ''
+                ext.llm_phone = result.get('constituent_phone') or ''
+                ext.llm_address = result.get('constituent_address') or ''
+                ext.llm_complaint_addr = result.get('complaint_address') or ''
+                ext.llm_confidence = result.get('confidence') or ''
+                ext.llm_reasoning = result.get('reasoning') or ''
+                ext.flags.append("LLM_USED")
+
+                # LLM overrides best guess if it has an answer
+                if ext.llm_email and not is_staff_email(ext.llm_email):
+                    ext.best_email = ext.llm_email
+                if ext.llm_phone:
+                    ext.best_phone = ext.llm_phone
+                if ext.llm_address:
+                    ext.best_address = ext.llm_address
+
+                # Re-match and re-classify after LLM update
+                if not ext.sf_has_contact:
+                    _match_to_contacts(ext, ci)
+                _compute_fields(ext)
+                ext.action, ext.confidence = _determine_action(ext)
+
+                llm_calls += 1
+            time.sleep(0.1)
+
+    print(f"  {llm_calls} LLM calls made")
 
     # Duplicates
     duplicates = find_duplicates(results)
@@ -1488,7 +1603,7 @@ def main():
     parser.add_argument('contacts', nargs='?', help='Contacts export (CSV or XLSX)')
     parser.add_argument('-o', '--output', default='extraction_results.xlsx', help='Output file')
     parser.add_argument('--llm', action='store_true', help='Enable LLM disambiguation')
-    parser.add_argument('--llm-limit', type=int, default=500, help='Max LLM calls')
+    parser.add_argument('--llm-limit', type=int, default=1500, help='Max LLM calls (default 1500, use 0 for unlimited)')
     parser.add_argument('--api-key', help='Anthropic API key')
 
     args = parser.parse_args()

@@ -4,7 +4,7 @@ Tools for extracting missing contact information from Salesforce case text field
 
 ## The Problem
 
-Our Salesforce has **6,669 cases** but only 38% have a Contact linked. Many constituent emails, phone numbers, addresses, and names are buried in case Description, Subject, and Notes fields, typed in by staff during phone intake, pasted from email threads, or submitted through web forms. This toolkit extracts that data, matches it to existing contacts, and tells our team exactly what to do with each case.
+Our Salesforce has **6,669 cases** but only 38% have a Contact linked. Many constituent emails, phone numbers, addresses, and names are buried in case Description, Subject, and Notes fields — typed in by staff during phone intake, pasted from email threads, or submitted through web forms. This toolkit extracts that data, matches it to existing contacts, and tells your team exactly what to do with each case.
 
 ## Tools
 
@@ -155,12 +155,21 @@ The extractor builds a contact index from both your Contacts export and linked c
 
 ### LLM Disambiguation
 
-When `--llm` is enabled, Claude Haiku is called for cases where regex alone can't determine the constituent:
-- Multiple emails extracted (which one is the constituent's?)
-- Multiple addresses without constituent context clues
-- Email chains where forwarded content may confuse extraction
+When `--llm` is enabled, the script does a two-pass approach:
 
-Estimated cost: ~$0.30–0.50 for a full run. Use `--llm-limit N` to cap calls.
+1. **Pass 1** — regex extraction on all cases (fast, free)
+2. **Pass 2** — score every ambiguous case by priority, then send the top N to Claude Haiku
+
+**Priority scoring** (highest value first):
+- Unlinked multi-person cases (score ~160+) — hardest to resolve by regex
+- Unlinked cases with multiple emails (score ~145) — LLM picks the right one → enables `CREATE_CONTACT`
+- Email chains from unlinked cases (score ~130) — forwarded vs original sender
+- Multiple addresses (score ~25) — separates constituent address from complaint address
+- Already-linked cases rank lower (enrichment is less urgent than linkage)
+
+This means if you have 1,363 eligible cases and a limit of 500, the 500 most impactful cases get LLM attention first.
+
+**Default limit: 1,500** (covers all ~1,363 eligible cases in your data). Use `--llm-limit 0` for unlimited, or `--llm-limit 500` to cap. Estimated cost: ~$0.001/call via Haiku, so ~$1.50 for a full run.
 
 ---
 
@@ -168,7 +177,7 @@ Estimated cost: ~$0.30–0.50 for a full run. Use `--llm-limit N` to cap calls.
 
 ### What It Does
 
-Compares every sender in your Outlook export against all known Salesforce emails to find people who emailed the office but never got a case or contact created.
+Compares every sender in our Outlook export against all known Salesforce emails to find people who emailed the office but never got a case or contact created.
 
 ### Improvements Over v1
 

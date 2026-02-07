@@ -4,7 +4,7 @@ Tools for extracting missing contact information from Salesforce case text field
 
 ## The Problem
 
-Your Salesforce has **6,669 cases** but only 38% have a Contact linked. Many constituent emails, phone numbers, addresses, and names are buried in case Description, Subject, and Notes fields — typed in by staff during phone intake, pasted from email threads, or submitted through web forms. This toolkit extracts that data, matches it to existing contacts, and tells your team exactly what to do with each case.
+Our Salesforce has **6,669 cases** but only 38% have a Contact linked. Many constituent emails, phone numbers, addresses, and names are buried in case Description, Subject, and Notes fields, typed in by staff during phone intake, pasted from email threads, or submitted through web forms. This toolkit extracts that data, matches it to existing contacts, and tells our team exactly what to do with each case.
 
 ## Tools
 
@@ -20,23 +20,42 @@ Your Salesforce has **6,669 cases** but only 38% have a Contact linked. Many con
 pip install pandas openpyxl rapidfuzz anthropic python-dotenv
 
 # Run the extractor (regex-only — free, fast, ~10 seconds)
-python constituent_extractor_v4.py cases.xlsx contacts.csv -o results.xlsx
+python scripts/constituent_extractor_v4.py data/cases.xlsx data/contacts.xlsx -o output/results.xlsx
 
 # Run the extractor with LLM disambiguation for ambiguous cases (~$0.30-0.50)
-export ANTHROPIC_API_KEY=your_key_here
-python constituent_extractor_v4.py cases.xlsx contacts.csv -o results.xlsx --llm
+# PowerShell:
+$env:ANTHROPIC_API_KEY="your_key_here"
+python scripts/constituent_extractor_v4.py data/cases.xlsx data/contacts.xlsx -o output/results.xlsx --llm
+# Or pass it directly:
+python scripts/constituent_extractor_v4.py data/cases.xlsx data/contacts.xlsx -o output/results.xlsx --llm --api-key sk-ant-...
 
 # Run the Outlook matcher
-python outlook_matcher_v2.py cases.xlsx contacts.csv outlook_export.csv -o outlook_results.xlsx
+python scripts/outlook_matcher_v2.py data/cases.xlsx data/contacts.xlsx data/outlook_export.csv -o output/outlook_results.xlsx
 
 # Cross-reference Outlook matcher with extractor output
-python outlook_matcher_v2.py cases.xlsx contacts.csv outlook.csv -o outlook_results.xlsx \
-    --extractor-output results.xlsx --after 2024-01-01
+python scripts/outlook_matcher_v2.py data/cases.xlsx data/contacts.xlsx data/outlook_export.csv \
+    -o output/outlook_results.xlsx --extractor-output output/results.xlsx --after 2024-01-01
+```
+
+### Project Layout
+
+```
+salesforce-cleanup/
+├── data/
+│   ├── cases.xlsx          # Salesforce cases export
+│   └── contacts.xlsx       # Salesforce contacts export
+├── output/                 # Generated results go here
+├── scripts/
+│   ├── constituent_extractor_v4.py
+│   └── outlook_matcher_v2.py
+├── venv/                   # Python virtual environment
+├── README.md
+└── requirements.txt
 ```
 
 ### Input Formats
 
-Both scripts auto-detect CSV and XLSX. No conversion needed.
+Both scripts auto-detect CSV and XLSX — even if the extension is wrong, they'll try both formats. No conversion needed.
 
 **Cases export** — Standard Salesforce case export with columns: `Case Number`, `Subject`, `Description`, `Case Notes`, `Case Comments`, `Contact Name`, `Contact: Email`, `Web Email`, `Contact ID`, `Contact: Phone`.
 
@@ -177,9 +196,10 @@ Compares every sender in your Outlook export against all known Salesforce emails
 
 ```
 1.  Export cases and contacts from Salesforce (CSV or XLSX, either works)
+    Place them in the data/ folder.
 
 2.  Run the extractor:
-      python constituent_extractor_v4.py cases.xlsx contacts.csv -o results.xlsx
+      python scripts/constituent_extractor_v4.py data/cases.xlsx data/contacts.xlsx -o output/results.xlsx
 
 3.  Work through the output sheets in order:
       a. Link       — Connect unlinked cases to existing contacts (709 cases)
@@ -189,11 +209,11 @@ Compares every sender in your Outlook export against all known Salesforce emails
       e. Create-Review — Cases needing judgment (38 cases)
 
 4.  (Optional) Run with LLM for the ambiguous cases:
-      python constituent_extractor_v4.py cases.xlsx contacts.csv -o results_llm.xlsx --llm
+      python scripts/constituent_extractor_v4.py data/cases.xlsx data/contacts.xlsx -o output/results_llm.xlsx --llm
 
 5.  (Optional) Run the Outlook matcher to find missed emails:
-      python outlook_matcher_v2.py cases.xlsx contacts.csv outlook.csv -o outlook.xlsx \
-          --extractor-output results.xlsx
+      python scripts/outlook_matcher_v2.py data/cases.xlsx data/contacts.xlsx data/outlook.csv \
+          -o output/outlook.xlsx --extractor-output output/results.xlsx
 
 6.  Import changes to Salesforce
 ```
@@ -213,8 +233,8 @@ Install all: `pip install pandas openpyxl rapidfuzz anthropic python-dotenv`
 ## Files
 
 ```
-constituent_extractor_v4.py   # Main extraction and matching script
-outlook_matcher_v2.py         # Outlook-to-Salesforce email matcher
-README.md                     # This file
-requirements.txt              # Python dependencies
+scripts/constituent_extractor_v4.py   # Main extraction and matching script
+scripts/outlook_matcher_v2.py         # Outlook-to-Salesforce email matcher
+README.md                             # This file
+requirements.txt                      # Python dependencies
 ```

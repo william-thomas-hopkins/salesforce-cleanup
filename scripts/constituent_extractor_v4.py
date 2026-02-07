@@ -56,9 +56,7 @@ except ImportError:
     pass
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+# config
 
 TEXT_FIELDS = ['Subject', 'Description', 'Case Notes', 'Case Comments']
 
@@ -75,9 +73,7 @@ VALID_AREA_CODES = {
     '519', '226', '548', '613', '343', '705', '249', '807',
 }
 
-# ============================================================
-# REGEX PATTERNS
-# ============================================================
+# regex patterns
 
 RE_EMAIL = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', re.I)
 RE_PHONE_10 = re.compile(r'\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}')
@@ -197,9 +193,7 @@ FALSE_POSITIVE_NAMES = {
 }
 
 
-# ============================================================
-# DATA STRUCTURES
-# ============================================================
+# data structures
 
 @dataclass
 class PersonBlock:
@@ -278,9 +272,7 @@ class CaseExtraction:
     extractable_fields: List[str] = field(default_factory=list)
 
 
-# ============================================================
-# UTILITY FUNCTIONS
-# ============================================================
+# utility functions
 
 def safe_str(value) -> str:
     if pd.isna(value) or value is None:
@@ -299,16 +291,41 @@ def is_staff_email(email: str) -> bool:
 
 
 def load_file(path: str) -> pd.DataFrame:
-    """Load CSV or XLSX automatically."""
+    """Load CSV or XLSX automatically. Tries both formats as fallback."""
     p = Path(path)
+    errors = []
+
+    # Try XLSX first if extension suggests it, otherwise try CSV first
     if p.suffix.lower() in ('.xlsx', '.xls'):
-        return pd.read_excel(path)
-    for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']:
         try:
-            return pd.read_csv(path, encoding=enc)
-        except (UnicodeDecodeError, Exception):
-            continue
-    raise ValueError(f"Could not read {path}")
+            return pd.read_excel(path)
+        except Exception as e:
+            errors.append(f"Excel: {e}")
+        # Fallback: try CSV
+        for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']:
+            try:
+                return pd.read_csv(path, encoding=enc)
+            except Exception:
+                continue
+    else:
+        # Try CSV first
+        for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']:
+            try:
+                return pd.read_csv(path, encoding=enc)
+            except Exception as e:
+                errors.append(f"CSV({enc}): {e}")
+                continue
+        # Fallback: try XLSX (file might be xlsx despite extension)
+        try:
+            return pd.read_excel(path)
+        except Exception as e:
+            errors.append(f"Excel fallback: {e}")
+
+    raise ValueError(
+        f"Could not read {path}\n"
+        f"  Tried formats: {'; '.join(errors[:3])}\n"
+        f"  Hint: Check the file exists and the extension matches the format."
+    )
 
 
 def normalize_phone(phone: str) -> Tuple[str, str]:
@@ -375,9 +392,7 @@ def clean_name(name: str) -> Optional[str]:
     return name
 
 
-# ============================================================
-# EXTRACTION ENGINE
-# ============================================================
+# extraction engine
 
 def extract_emails(text: str) -> List[str]:
     """Extract non-staff emails from text."""
@@ -479,9 +494,7 @@ def parse_structured_address(case_notes: str) -> Tuple[str, str, str]:
     return street, city, postal
 
 
-# ============================================================
-# PERSON BLOCK DETECTION
-# ============================================================
+# person block detection
 
 def detect_person_blocks(text: str) -> List[PersonBlock]:
     """
@@ -645,9 +658,7 @@ def detect_person_blocks(text: str) -> List[PersonBlock]:
     return persons
 
 
-# ============================================================
-# MATCHING ENGINE
-# ============================================================
+# matching engine
 
 class ContactIndex:
     """Index of existing contacts for matching."""
@@ -744,9 +755,7 @@ class ContactIndex:
         return None
 
 
-# ============================================================
-# LLM DISAMBIGUATION
-# ============================================================
+# llm disambiguation
 
 LLM_PROMPT = """You are extracting constituent contact info from a Toronto city councillor's case.
 
@@ -816,9 +825,7 @@ def needs_llm(ext: CaseExtraction) -> bool:
     return False
 
 
-# ============================================================
-# MAIN EXTRACTION PIPELINE
-# ============================================================
+# main extraction pipeline
 
 def extract_case(row: pd.Series, contact_index: ContactIndex,
                  client=None, use_llm=False) -> CaseExtraction:
@@ -1078,9 +1085,7 @@ def _determine_action(ext: CaseExtraction) -> Tuple[str, str]:
     return "NO_CONTACT_INFO", "none"
 
 
-# ============================================================
-# DUPLICATE DETECTION
-# ============================================================
+# duplicate detection
 
 def find_duplicates(results: List[CaseExtraction]) -> Dict[str, List[int]]:
     email_to_idxs = defaultdict(list)
@@ -1090,9 +1095,7 @@ def find_duplicates(results: List[CaseExtraction]) -> Dict[str, List[int]]:
     return {e: idxs for e, idxs in email_to_idxs.items() if len(idxs) > 1}
 
 
-# ============================================================
-# EXCEL OUTPUT
-# ============================================================
+# excel output
 
 ACTION_COLORS = {
     'COMPLETE': '90EE90',
@@ -1362,9 +1365,7 @@ def create_excel(output_df: pd.DataFrame, output_path: str, stats: dict,
     wb.save(output_path)
 
 
-# ============================================================
-# MAIN
-# ============================================================
+# main
 
 def process(cases_path: str, contacts_path: Optional[str], output_path: str,
             use_llm: bool = False, llm_limit: int = 500, api_key: str = "") -> dict:

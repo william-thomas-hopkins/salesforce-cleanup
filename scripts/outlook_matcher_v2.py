@@ -91,16 +91,37 @@ THIN_BORDER = Border(
 # utilities
 
 def load_file(path: str) -> pd.DataFrame:
-    """Load CSV or XLSX automatically."""
+    """Load CSV or XLSX automatically. Tries both formats as fallback."""
     p = Path(path)
+    errors = []
+
     if p.suffix.lower() in ('.xlsx', '.xls'):
-        return pd.read_excel(path)
-    for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']:
         try:
-            return pd.read_csv(path, encoding=enc)
-        except (UnicodeDecodeError, Exception):
-            continue
-    raise ValueError(f"Could not read {path}")
+            return pd.read_excel(path)
+        except Exception as e:
+            errors.append(f"Excel: {e}")
+        for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']:
+            try:
+                return pd.read_csv(path, encoding=enc)
+            except Exception:
+                continue
+    else:
+        for enc in ['utf-8-sig', 'utf-8', 'latin-1', 'cp1252']:
+            try:
+                return pd.read_csv(path, encoding=enc)
+            except Exception as e:
+                errors.append(f"CSV({enc}): {e}")
+                continue
+        try:
+            return pd.read_excel(path)
+        except Exception as e:
+            errors.append(f"Excel fallback: {e}")
+
+    raise ValueError(
+        f"Could not read {path}\n"
+        f"  Tried formats: {'; '.join(errors[:3])}\n"
+        f"  Hint: Check the file exists and the extension matches the format."
+    )
 
 
 def normalize_email(email) -> Optional[str]:

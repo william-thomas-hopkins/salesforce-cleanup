@@ -195,7 +195,6 @@ FALSE_POSITIVE_NAMES = {
 
 # data structures
 
-
 @dataclass
 class PersonBlock:
     """A grouped set of contact info for one person found in text."""
@@ -496,7 +495,7 @@ def parse_structured_address(case_notes: str) -> Tuple[str, str, str]:
     return street, city, postal
 
 
-# person block detection
+# person block
 
 def detect_person_blocks(text: str) -> List[PersonBlock]:
     """
@@ -805,12 +804,38 @@ def call_llm(text, emails, phones, addresses, people, client):
             messages=[{"role": "user", "content": prompt}],
         )
         txt = resp.content[0].text.strip()
-        jm = re.search(r'\{[^{}]*\}', txt, re.DOTALL)
-        if jm:
-            return json.loads(jm.group())
+
+        # Strip markdown code fences if present
+        txt = re.sub(r'^```(?:json)?\s*', '', txt)
+        txt = re.sub(r'\s*```$', '', txt)
+        txt = txt.strip()
+
+        # Try parsing the full response as JSON first
+        try:
+            return json.loads(txt)
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: find JSON object with balanced braces
+        depth = 0
+        start = None
+        for i, ch in enumerate(txt):
+            if ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0 and start is not None:
+                    try:
+                        return json.loads(txt[start:i + 1])
+                    except json.JSONDecodeError:
+                        pass
+                    start = None
+
+        return {'error': f'JSON parse failed: {txt[:200]}'}
     except Exception as e:
         return {'error': str(e)}
-    return None
 
 
 def needs_llm(ext: CaseExtraction) -> bool:
@@ -1420,6 +1445,7 @@ def create_excel(output_df: pd.DataFrame, output_path: str, stats: dict,
 
 
 # main
+
 def process(cases_path: str, contacts_path: Optional[str], output_path: str,
             use_llm: bool = False, llm_limit: int = 1500, api_key: str = "") -> dict:
 
@@ -1437,7 +1463,7 @@ def process(cases_path: str, contacts_path: Optional[str], output_path: str,
     client = None
     if use_llm and api_key and HAS_ANTHROPIC:
         client = anthropic.Anthropic(api_key=api_key)
-        print("LLM disambiguation enabled")
+        print(f"LLM disambiguation enabled (anthropic SDK v{anthropic.__version__})")
     else:
         use_llm = False
         print("LLM disambiguation disabled (regex-only mode)")
@@ -1491,13 +1517,41 @@ def process(cases_path: str, contacts_path: Optional[str], output_path: str,
                     reasons['multi_address'] += 1
             print(f"  Priority breakdown: {dict(reasons)}")
 
+        # Test call before full loop to fail fast
+        print("  Testing first LLM call...")
+        test_ext = llm_candidates[0][2]
+        test_result = call_llm(
+            test_ext._combined_text, test_ext.all_emails,
+            test_ext.all_phones, test_ext.all_addresses,
+            test_ext.persons, client
+        )
+        if test_result and 'error' not in test_result:
+            print(f"  Test call succeeded: keys={list(test_result.keys())}")
+        else:
+            err = test_result.get('error', str(test_result)) if test_result else 'None returned'
+            print(f"  *** Test call FAILED: {err[:500]}")
+            print(f"  Skipping LLM Pass 2 — fix the error above and re-run")
+            use_llm = False
+
+    if use_llm and client and llm_candidates:
+        llm_errors = 0
+        first_error = None
         for rank, (score, idx, ext) in enumerate(llm_candidates[:to_process]):
             if rank % 100 == 0 and rank > 0:
-                print(f"  {rank}/{to_process} LLM calls made")
+                print(f"  {rank}/{to_process} sent (success: {llm_calls}, errors: {llm_errors})")
 
             combined = ext._combined_text
             result = call_llm(combined, ext.all_emails, ext.all_phones,
                               ext.all_addresses, ext.persons, client)
+
+            # Diagnostic: print first result in detail
+            if rank == 0:
+                if result and 'error' not in result:
+                    print(f"  First LLM call succeeded: {list(result.keys())}")
+                else:
+                    err = result.get('error', str(result)) if result else 'None returned'
+                    print(f"  *** First LLM call FAILED: {err[:300]}")
+
             if result and 'error' not in result:
                 ext.llm_used = True
                 ext.llm_email = result.get('constituent_email') or ''
@@ -1523,7 +1577,17 @@ def process(cases_path: str, contacts_path: Optional[str], output_path: str,
                 ext.action, ext.confidence = _determine_action(ext)
 
                 llm_calls += 1
+            else:
+                llm_errors += 1
+                if first_error is None and result:
+                    first_error = result.get('error', str(result))
+                ext.flags.append(f"LLM_ERROR")
             time.sleep(0.1)
+
+        if llm_errors > 0:
+            print(f"  WARNING: {llm_errors} LLM calls failed")
+            if first_error:
+                print(f"  Sample error: {first_error[:300]}")
 
     print(f"  {llm_calls} LLM calls made")
 
